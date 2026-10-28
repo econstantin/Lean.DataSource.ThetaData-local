@@ -1,4 +1,4 @@
-﻿/*
+/*
  * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
  * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
  *
@@ -28,4 +28,7 @@ public class ValueSubscriptionPlan : ISubscriptionPlan
     public uint MaxStreamingContracts => 0;
 
     public RateGate? RateGate => null;
+
+    /// <inheritdoc />
+    public int MaxConcurrentRequests => 2;
 }
