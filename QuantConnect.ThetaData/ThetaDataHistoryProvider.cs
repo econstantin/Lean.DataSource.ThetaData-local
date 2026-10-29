@@ -1,4 +1,4 @@
-/*
+﻿/*
  * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
  * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
  *
@@ -196,7 +196,10 @@ namespace QuantConnect.Lean.DataSource.ThetaData
 
             var queryParameters = GetSymbolQueryParameters(symbol);
             queryParameters[RequestParameters.StartDate] = startDateTimeUtc.ConvertFromUtc(TimeZoneThetaData).ConvertToThetaDataDateFormat();
-            queryParameters[RequestParameters.EndDate] = historyRequest.EndTimeUtc.ConvertFromUtc(TimeZoneThetaData).ConvertToThetaDataDateFormat();
+            // The end time is exclusive. A request that ends at midnight holds no data of that day, so it ends on the day before.
+            var endDateTimeThetaData = historyRequest.EndTimeUtc.ConvertFromUtc(TimeZoneThetaData);
+            var lastDate = endDateTimeThetaData.TimeOfDay == TimeSpan.Zero ? endDateTimeThetaData.AddDays(-1) : endDateTimeThetaData;
+            queryParameters[RequestParameters.EndDate] = lastDate.ConvertToThetaDataDateFormat();
 
             if (historyRequest.TickType == TickType.OpenInterest)
             {

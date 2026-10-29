@@ -232,26 +232,33 @@ namespace QuantConnect.Lean.DataSource.ThetaData
                 throw new ThetaDataRequestException($"{nameof(ThetaDataRestApiClient)}: The response is not JSON. It starts with: '{Truncate(json)}'", innerException: e);
             }
 
-            var items = root as JArray ?? root["response"] as JArray
+            var items = root as JArray ?? (root as JObject)?["response"] as JArray
                 ?? throw new ThetaDataRequestException($"{nameof(ThetaDataRestApiClient)}: The response has no 'response' array. It starts with: '{Truncate(json)}'");
 
             var rows = new List<T>(items.Count);
-            foreach (var item in items)
+            try
             {
-                if (item is JObject entry && entry["data"] is JArray data && entry["contract"] is JObject contractToken)
+                foreach (var item in items)
                 {
-                    var contract = contractToken.ToObject<ThetaDataContract>(Serializer)!;
-                    foreach (var dataItem in data)
+                    if (item is JObject entry && entry["data"] is JArray data && entry["contract"] is JObject contractToken)
                     {
-                        var row = dataItem.ToObject<T>(Serializer)!;
-                        row.Contract = contract;
-                        rows.Add(row);
+                        var contract = contractToken.ToObject<ThetaDataContract>(Serializer)!;
+                        foreach (var dataItem in data)
+                        {
+                            var row = dataItem.ToObject<T>(Serializer)!;
+                            row.Contract = contract;
+                            rows.Add(row);
+                        }
+                    }
+                    else
+                    {
+                        rows.Add(item.ToObject<T>(Serializer)!);
                     }
                 }
-                else
-                {
-                    rows.Add(item.ToObject<T>(Serializer)!);
-                }
+            }
+            catch (Exception e) when (e is JsonException or ArgumentException or FormatException or OverflowException)
+            {
+                throw new ThetaDataRequestException($"{nameof(ThetaDataRestApiClient)}: A row of the response does not match {typeof(T).Name}: {e.Message} The response starts with: '{Truncate(json)}'", innerException: e);
             }
             return rows;
         }

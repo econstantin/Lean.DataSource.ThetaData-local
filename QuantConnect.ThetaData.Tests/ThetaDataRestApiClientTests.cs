@@ -219,6 +219,18 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.Throws<ThetaDataRequestException>(() => client.GetRows<EndOfDayRow>(ThetaDataEndpoints.EndOfDay(SecurityType.Equity), SpyEod));
         }
 
+        [TestCase("\"No data\"")]
+        [TestCase("42")]
+        [TestCase("{\"response\":[{\"created\":\"N/A\",\"close\":1.5}]}")]
+        [TestCase("{\"response\":[{\"created\":\"2026-10-20T17:15:44.979\",\"close\":\"abc\"}]}")]
+        public void RejectsAJsonBodyThatHoldsNoV3Rows(string body)
+        {
+            var handler = new FakeThetaDataHandler(_ => FakeThetaDataHandler.Respond(200, body));
+            using var client = CreateClient(handler);
+
+            Assert.Throws<ThetaDataRequestException>(() => client.GetRows<EndOfDayRow>(ThetaDataEndpoints.EndOfDay(SecurityType.Equity), SpyEod));
+        }
+
         [TestCase("1m", "20260101", "20260301", 3)]
         [TestCase("1h", "20260101", "20260128", 1)]
         [TestCase("1s", "20261019", "20261021", 3)]

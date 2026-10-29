@@ -39,7 +39,7 @@ public static class ThetaDataEndpoints
     public static string EndOfDay(SecurityType securityType) => $"{GetAssetPath(securityType)}/history/eod";
 
     /// <summary>
-    /// Intraday trade bars. An index has no trades, so its bars come from the index price.
+    /// Intraday trade bars. For an index, the OHLC of the index price.
     /// </summary>
     public static string Ohlc(SecurityType securityType) => $"{GetAssetPath(securityType)}/history/ohlc";
 

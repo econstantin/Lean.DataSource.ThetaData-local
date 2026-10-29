@@ -97,6 +97,9 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             var request = handler.Requests.Single();
             Assert.AreEqual("stock/history/eod", request.Path);
             Assert.AreEqual("SPY", request.Query["symbol"]);
+            // The request ends at 2026-10-21 00:00 ET, so it holds no data of 2026-10-21.
+            Assert.AreEqual("20261019", request.Query["start_date"]);
+            Assert.AreEqual("20261020", request.Query["end_date"]);
         }
 
         [Test]
