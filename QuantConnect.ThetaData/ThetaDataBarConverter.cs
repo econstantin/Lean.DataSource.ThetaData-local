@@ -22,7 +22,7 @@ namespace QuantConnect.Lean.DataSource.ThetaData
 {
     /// <summary>
     /// Converts v3 rows to LEAN data. Each method returns null for a row that holds no market observation.
-    /// It never invents a price.
+    /// It never invents a price: a missing side of a quote stays missing.
     /// </summary>
     /// <remarks>
     /// ThetaData sends times as ET wall-clock times, see https://thetadata.net/docs/Articles/Data-And-Requests/OHLC-EOD.html.
@@ -56,8 +56,9 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         /// </summary>
         /// <remarks>
         /// The NBBO is the one at report time, about 17:15 ET, not at the 16:00 close.
+        /// A side with a price or size of 0 has no quote, so the bar leaves that side empty (issue #11).
         /// </remarks>
-        /// <returns>Null when a side has a price or size of 0, as before v3.</returns>
+        /// <returns>Null when neither side has a quote.</returns>
         public static QuoteBar? ToDailyQuoteBar(EndOfDayRow row, Symbol symbol, DateTimeZone exchangeTimeZone)
         {
             return CreateQuoteBar(ToTradingDay(row, exchangeTimeZone), symbol, row.Bid, row.BidSize, row.Ask, row.AskSize, Time.OneDay);
@@ -79,24 +80,27 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         /// <summary>
         /// Creates an intraday quote bar from the last NBBO of the interval.
         /// </summary>
-        /// <returns>Null when a side has a price or size of 0.</returns>
+        /// <returns>Null when neither side has a quote.</returns>
         public static QuoteBar? ToQuoteBar(QuoteRow row, Symbol symbol, TimeSpan period, DateTimeZone exchangeTimeZone)
         {
             return CreateQuoteBar(ToExchangeTime(row.Timestamp, exchangeTimeZone), symbol, row.Bid, row.BidSize, row.Ask, row.AskSize, period);
         }
 
         /// <summary>
-        /// Creates a quote tick.
+        /// Creates a quote tick. A side with no quote keeps a price and size of 0, as a LEAN quote tick does.
         /// </summary>
-        /// <returns>Null when a side has a price or size of 0.</returns>
+        /// <returns>Null when neither side has a quote.</returns>
         public static Tick? ToQuoteTick(QuoteRow row, Symbol symbol, DateTimeZone exchangeTimeZone)
         {
-            if (!HasBothSides(row.Bid, row.BidSize, row.Ask, row.AskSize))
+            var hasBid = row.Bid > 0 && row.BidSize > 0;
+            var hasAsk = row.Ask > 0 && row.AskSize > 0;
+            if (!hasBid && !hasAsk)
             {
                 return null;
             }
-            return new Tick(ToExchangeTime(row.Timestamp, exchangeTimeZone), symbol, string.Empty, row.AskExchange.TryGetExchangeOrDefault(),
-                row.BidSize, row.Bid, row.AskSize, row.Ask);
+            var exchange = (hasAsk ? row.AskExchange : row.BidExchange).TryGetExchangeOrDefault();
+            return new Tick(ToExchangeTime(row.Timestamp, exchangeTimeZone), symbol, string.Empty, exchange,
+                hasBid ? row.BidSize : 0m, hasBid ? row.Bid : 0m, hasAsk ? row.AskSize : 0m, hasAsk ? row.Ask : 0m);
         }
 
         /// <summary>
@@ -148,6 +152,44 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         }
 
         /// <summary>
+        /// Builds hour bars from minute bars. Each minute bar goes into the clock hour in which it starts.
+        /// </summary>
+        /// <remarks>
+        /// LEAN hour bars start on the clock hour, so the first regular-session equity bar is 09:00 to 10:00 and holds the minutes from 09:30.
+        /// A quote side stays empty when no minute of the hour has it.
+        /// </remarks>
+        public static List<BaseData> ToHourBars(IEnumerable<BaseData> minuteBars)
+        {
+            var hourBars = new List<BaseData>();
+            foreach (var hour in minuteBars.OrderBy(x => x.Time).GroupBy(x => (x.Symbol, Start: x.Time.RoundDown(Time.OneHour), Type: x.GetType())))
+            {
+                if (hour.Key.Type == typeof(TradeBar))
+                {
+                    var trades = hour.Cast<TradeBar>().ToList();
+                    hourBars.Add(new TradeBar(hour.Key.Start, hour.Key.Symbol, trades[0].Open, trades.Max(x => x.High), trades.Min(x => x.Low),
+                        trades[^1].Close, trades.Sum(x => x.Volume), Time.OneHour));
+                }
+                else if (hour.Key.Type == typeof(QuoteBar))
+                {
+                    var quotes = hour.Cast<QuoteBar>().ToList();
+                    var bids = quotes.Where(x => x.Bid != null).ToList();
+                    var asks = quotes.Where(x => x.Ask != null).ToList();
+                    hourBars.Add(new QuoteBar(hour.Key.Start, hour.Key.Symbol,
+                        bids.Count > 0 ? new Bar(bids[0].Bid.Open, bids.Max(x => x.Bid.High), bids.Min(x => x.Bid.Low), bids[^1].Bid.Close) : null,
+                        bids.Count > 0 ? bids[^1].LastBidSize : 0m,
+                        asks.Count > 0 ? new Bar(asks[0].Ask.Open, asks.Max(x => x.Ask.High), asks.Min(x => x.Ask.Low), asks[^1].Ask.Close) : null,
+                        asks.Count > 0 ? asks[^1].LastAskSize : 0m,
+                        Time.OneHour));
+                }
+                else
+                {
+                    throw new ArgumentException($"{nameof(ThetaDataBarConverter)}.{nameof(ToHourBars)}: Unsupported data type {hour.Key.Type.Name}.");
+                }
+            }
+            return hourBars;
+        }
+
+        /// <summary>
         /// The trading day of an end-of-day row, as midnight in the exchange time zone.
         /// ThetaData builds the report after the close of that day, so the date of <see cref="EndOfDayRow.Created"/> is the trading day.
         /// </summary>
@@ -162,17 +204,18 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         private static bool HasValidPrices(decimal open, decimal high, decimal low, decimal close)
             => open > 0 && high > 0 && low > 0 && close > 0;
 
-        // The connector has always dropped a quote with an empty side. Issue #11 asks to keep 1-sided quotes.
-        private static bool HasBothSides(decimal bid, decimal bidSize, decimal ask, decimal askSize)
-            => bid > 0 && bidSize > 0 && ask > 0 && askSize > 0;
-
         private static QuoteBar? CreateQuoteBar(DateTime time, Symbol symbol, decimal bid, decimal bidSize, decimal ask, decimal askSize, TimeSpan period)
         {
-            if (!HasBothSides(bid, bidSize, ask, askSize))
+            var hasBid = bid > 0 && bidSize > 0;
+            var hasAsk = ask > 0 && askSize > 0;
+            if (!hasBid && !hasAsk)
             {
                 return null;
             }
-            return new QuoteBar(time, symbol, new Bar(bid, bid, bid, bid), bidSize, new Bar(ask, ask, ask, ask), askSize, period);
+            return new QuoteBar(time, symbol,
+                hasBid ? new Bar(bid, bid, bid, bid) : null, hasBid ? bidSize : 0m,
+                hasAsk ? new Bar(ask, ask, ask, ask) : null, hasAsk ? askSize : 0m,
+                period);
         }
     }
 }

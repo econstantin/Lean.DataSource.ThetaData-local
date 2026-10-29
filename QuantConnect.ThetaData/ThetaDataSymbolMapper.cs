@@ -15,6 +15,7 @@
 
 using System.Globalization;
 using QuantConnect.Brokerages;
+using QuantConnect.Securities.IndexOption;
 using System.Collections.Concurrent;
 using QuantConnect.Lean.DataSource.ThetaData.Models.Rest;
 using QuantConnect.Lean.DataSource.ThetaData.Models.Enums;
@@ -112,6 +113,11 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             {
                 switch (contractSecurityType)
                 {
+                    // The streaming API sends an index option as an option. On a cache miss only the root (SPXW, SPX, VIX, ...) tells them apart.
+                    case ContractSecurityType.Option when IndexOptionSymbol.IsIndexOption(root):
+                        return GetLeanSymbol(root, SecurityType.IndexOption, MARKET, SecurityType.IndexOption.DefaultOptionStyle(),
+                            dataProviderDate.ConvertFromThetaDataDateFormat(), ConvertStrikePriceFromThetaDataFormat(strike), ConvertContractOptionRightFromThetaDataFormat(right),
+                            Symbol.Create(IndexOptionSymbol.MapToUnderlying(root), SecurityType.Index, MARKET));
                     case ContractSecurityType.Option:
                         return GetLeanSymbol(root, SecurityType.Option, MARKET, dataProviderDate.ConvertFromThetaDataDateFormat(), ConvertStrikePriceFromThetaDataFormat(strike), ConvertContractOptionRightFromThetaDataFormat(right));
                     case ContractSecurityType.Equity:

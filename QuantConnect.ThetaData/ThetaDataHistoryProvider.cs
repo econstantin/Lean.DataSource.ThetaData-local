@@ -13,6 +13,7 @@
  * limitations under the License.
 */
 
+using System.Text;
 using NodaTime;
 using QuantConnect.Data;
 using QuantConnect.Logging;
@@ -21,6 +22,7 @@ using QuantConnect.Data.Market;
 using QuantConnect.Securities;
 using System.Collections.Concurrent;
 using QuantConnect.Lean.Engine.DataFeeds;
+using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Lean.Engine.HistoricalData;
 using QuantConnect.Lean.DataSource.ThetaData.Models.Rest;
 using QuantConnect.Lean.DataSource.ThetaData.Models.Interfaces;
@@ -69,6 +71,16 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         /// Only 'Trade' TickType is supported for Index securities, and this warning helps to prevent invalid requests.
         /// </remarks>
         private volatile bool _invalidIndexTickTypeWarningFired;
+
+        /// <summary>
+        /// Indicates whether the warning for an unsupported canonical option request has been fired.
+        /// </summary>
+        private volatile bool _unsupportedCanonicalRequestWarningFired;
+
+        /// <summary>
+        /// True after the plan denied the open interest of an option universe. Later universes are built without it.
+        /// </summary>
+        private volatile bool _universeOpenInterestDenied;
 
         /// <summary>
         /// The endpoints the plan denied, each logged once.
@@ -146,6 +158,12 @@ namespace QuantConnect.Lean.DataSource.ThetaData
                     Log.Error($"{nameof(ThetaDataProvider)}.{nameof(GetHistory)}: Error - The start date in the history request must come before the end date. No historical data will be returned.");
                 }
                 return null;
+            }
+
+            // A canonical option symbol, such as ?SPY, stands for the whole chain (issues #9 and #12).
+            if (IsSupportedCanonicalOption(historyRequest.Symbol))
+            {
+                return GetCanonicalOptionHistory(historyRequest, startDateTimeUtc);
             }
 
             if (!CanSubscribe(historyRequest.Symbol))
@@ -233,24 +251,197 @@ namespace QuantConnect.Lean.DataSource.ThetaData
                 return ticks;
             }
 
-            queryParameters[RequestParameters.Interval] = ThetaDataEndpoints.GetInterval(resolution);
+            // A regular-session equity request starts at 09:30. ThetaData would then start each hour bar at 09:30, but LEAN
+            // hour bars start on the clock hour. So the hour bars are built from minute bars, and the 09:00 bar holds 09:30 to 10:00.
+            var buildHourBars = resolution == Resolution.Hour && securityType == SecurityType.Equity && !historyRequest.IncludeExtendedMarketHours;
+            if (buildHourBars)
+            {
+                period = Time.OneMinute;
+            }
+            queryParameters[RequestParameters.Interval] = ThetaDataEndpoints.GetInterval(buildHourBars ? Resolution.Minute : resolution);
+            List<BaseData> history;
             switch (historyRequest.TickType)
             {
                 case TickType.Trade when securityType == SecurityType.Index && resolution == Resolution.Tick:
                     return NotNull(_restApiClient.GetRows<PriceRow>(ThetaDataEndpoints.Trade(securityType), queryParameters)
                         .Select(row => ThetaDataBarConverter.ToIndexTick(row, symbol, exchangeTimeZone)));
                 case TickType.Trade:
-                    return NotNull(_restApiClient.GetRows<OhlcRow>(ThetaDataEndpoints.Ohlc(securityType), queryParameters)
+                    history = NotNull(_restApiClient.GetRows<OhlcRow>(ThetaDataEndpoints.Ohlc(securityType), queryParameters)
                         .Select(row => ThetaDataBarConverter.ToTradeBar(row, symbol, period, exchangeTimeZone)));
+                    break;
                 case TickType.Quote when resolution == Resolution.Tick:
                     return NotNull(_restApiClient.GetRows<QuoteRow>(ThetaDataEndpoints.Quote(securityType), queryParameters)
                         .Select(row => ThetaDataBarConverter.ToQuoteTick(row, symbol, exchangeTimeZone)));
                 case TickType.Quote:
-                    return NotNull(_restApiClient.GetRows<QuoteRow>(ThetaDataEndpoints.Quote(securityType), queryParameters)
+                    history = NotNull(_restApiClient.GetRows<QuoteRow>(ThetaDataEndpoints.Quote(securityType), queryParameters)
                         .Select(row => ThetaDataBarConverter.ToQuoteBar(row, symbol, period, exchangeTimeZone)));
+                    break;
                 default:
                     throw new ArgumentException($"{nameof(ThetaDataProvider)}.{nameof(GetContractHistory)}: Invalid tick type: {historyRequest.TickType}.");
             }
+            return buildHourBars ? ThetaDataBarConverter.ToHourBars(history) : history;
+        }
+
+        /// <summary>
+        /// Gets the history of a whole option chain. Daily data comes from 1 bulk request per day.
+        /// </summary>
+        private IEnumerable<BaseData>? GetCanonicalOptionHistory(HistoryRequest historyRequest, DateTime startDateTimeUtc)
+        {
+            var canonical = historyRequest.Symbol;
+            var exchangeHours = historyRequest.ExchangeHours;
+            var startLocal = startDateTimeUtc.ConvertFromUtc(exchangeHours.TimeZone);
+            var endLocal = historyRequest.EndTimeUtc.ConvertFromUtc(exchangeHours.TimeZone);
+
+            if (historyRequest.DataType == typeof(OptionUniverse))
+            {
+                return WhenEntitled(canonical.SecurityType, TickType.Quote, () => GetOptionUniverseHistory(canonical, exchangeHours, startLocal, endLocal));
+            }
+
+            if (historyRequest.Resolution != Resolution.Daily)
+            {
+                if (!_unsupportedCanonicalRequestWarningFired)
+                {
+                    _unsupportedCanonicalRequestWarningFired = true;
+                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(GetHistory)}: A {historyRequest.Resolution} request for the whole chain '{canonical}' is not supported. Request option contracts instead.");
+                }
+                return null;
+            }
+
+            var history = WhenEntitled(canonical.SecurityType, historyRequest.TickType, () =>
+            {
+                var data = new List<BaseData>();
+                foreach (var day in Time.EachTradeableDay(exchangeHours, startLocal.Date, endLocal.Date))
+                {
+                    // Skip a day whose bar the filter would drop, to save a bulk request.
+                    if (!IsDailyBarInRange(day, exchangeHours, startLocal, endLocal))
+                    {
+                        continue;
+                    }
+                    data.AddRange(GetCanonicalOptionDailyData(canonical, day, historyRequest.TickType, exchangeHours.TimeZone));
+                }
+                return data;
+            });
+            if (history == null)
+            {
+                return null;
+            }
+            return FilterHistory(ThetaDataBarConverter.OrderAndRemoveDuplicates(history, Resolution.Daily), historyRequest, startLocal, endLocal);
+        }
+
+        /// <summary>
+        /// Gets the daily data of every contract of a chain on 1 day.
+        /// </summary>
+        private IEnumerable<BaseData> GetCanonicalOptionDailyData(Symbol canonical, DateTime day, TickType tickType, DateTimeZone exchangeTimeZone)
+        {
+            if (tickType == TickType.OpenInterest)
+            {
+                return GetChainOpenInterest(_restApiClient, _symbolMapper, canonical, day, exchangeTimeZone);
+            }
+
+            var rows = _optionEndOfDayLoader.GetRows(canonical.ID.Symbol, day);
+            return tickType == TickType.Quote
+                ? NotNull(rows.Select(row => ThetaDataBarConverter.ToDailyQuoteBar(row, _symbolMapper.GetLeanOptionSymbol(row.Contract!, canonical), exchangeTimeZone)))
+                : NotNull(rows.Select(row => ThetaDataBarConverter.ToDailyTradeBar(row, _symbolMapper.GetLeanOptionSymbol(row.Contract!, canonical), exchangeTimeZone)));
+        }
+
+        /// <summary>
+        /// Gets the open interest of every contract of a chain on 1 day, in 1 request (<c>expiration=*</c>).
+        /// </summary>
+        /// <exception cref="ThetaDataRequestException">The plan denies open interest (the Free plan does), or ThetaData failed to answer.</exception>
+        internal static List<BaseData> GetChainOpenInterest(ThetaDataRestApiClient restApiClient, ThetaDataSymbolMapper symbolMapper, Symbol canonical,
+            DateTime day, DateTimeZone exchangeTimeZone)
+        {
+            var date = day.ConvertToThetaDataDateFormat();
+            var parameters = new Dictionary<string, string>
+            {
+                [RequestParameters.Symbol] = canonical.ID.Symbol,
+                [RequestParameters.Expiration] = "*",
+                [RequestParameters.StartDate] = date,
+                [RequestParameters.EndDate] = date
+            };
+            return restApiClient.GetRows<OpenInterestRow>(ThetaDataEndpoints.OptionOpenInterest, parameters)
+                .Select(row => (BaseData)ThetaDataBarConverter.ToOpenInterest(row, symbolMapper.GetLeanOptionSymbol(row.Contract!, canonical), exchangeTimeZone))
+                .ToList();
+        }
+
+        /// <summary>
+        /// Builds the option universe of each trading day in the range, from the end-of-day report of that day (issue #12).
+        /// </summary>
+        /// <remarks>
+        /// LEAN's file-based universe for day D holds the data of D and becomes available at the end of D
+        /// (<see cref="BaseChainUniverseData.EndTime"/> is Time + 1 day). This method keeps that timing:
+        /// it returns the universe of D only when the request ends at or after the end of D, so it never uses data from the future.
+        /// The rows have open interest only when the plan includes it, and no implied volatility or greeks.
+        /// </remarks>
+        private List<BaseData> GetOptionUniverseHistory(Symbol canonical, SecurityExchangeHours exchangeHours, DateTime startLocal, DateTime endLocal)
+        {
+            var result = new List<BaseData>();
+            foreach (var day in Time.EachTradeableDay(exchangeHours, startLocal.Date, endLocal.Date))
+            {
+                if (day.AddDays(1) > endLocal)
+                {
+                    continue;
+                }
+                var universe = BuildOptionUniverse(canonical, day, exchangeHours.TimeZone);
+                if (universe != null)
+                {
+                    result.Add(universe);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Builds 1 day of option universe data in the format of LEAN's universe files, then reads it back with LEAN's own reader.
+        /// </summary>
+        /// <returns>The universe, or null when ThetaData has no option data for the day.</returns>
+        public OptionUniverse? BuildOptionUniverse(Symbol canonical, DateTime day, DateTimeZone exchangeTimeZone)
+        {
+            var rows = _optionEndOfDayLoader.GetRows(canonical.ID.Symbol, day);
+            if (rows.Count == 0)
+            {
+                return null;
+            }
+
+            var underlying = canonical.Underlying;
+            var underlyingDate = day.ConvertToThetaDataDateFormat();
+            // When the plan denies the underlying's data, the universe keeps its contracts and has no underlying line.
+            var underlyingRows = WhenEntitled(underlying.SecurityType, TickType.Trade, () => _restApiClient.GetRows<EndOfDayRow>(ThetaDataEndpoints.EndOfDay(underlying.SecurityType), new Dictionary<string, string>
+            {
+                [RequestParameters.Symbol] = _symbolMapper.GetBrokerageSymbol(underlying),
+                [RequestParameters.StartDate] = underlyingDate,
+                [RequestParameters.EndDate] = underlyingDate
+            }));
+            var underlyingBar = underlyingRows?.Select(row => ThetaDataBarConverter.ToDailyTradeBar(row, underlying, exchangeTimeZone)).FirstOrDefault(bar => bar != null && bar.Time.Date == day.Date);
+
+            // After 1 denial the universe is built without open interest, so the Free plan sends no denied request each day.
+            List<BaseData>? openInterest = null;
+            if (!_universeOpenInterestDenied)
+            {
+                openInterest = WhenEntitled(canonical.SecurityType, TickType.OpenInterest,
+                    () => GetChainOpenInterest(_restApiClient, _symbolMapper, canonical, day, exchangeTimeZone));
+                _universeOpenInterestDenied = openInterest == null;
+            }
+
+            var csv = ThetaDataOptionUniverseCsv.Build(canonical, rows, underlyingBar, _symbolMapper, exchangeTimeZone, openInterest?.Cast<OpenInterest>());
+            if (csv == null)
+            {
+                return null;
+            }
+
+            var config = new SubscriptionDataConfig(typeof(OptionUniverse), canonical, Resolution.Daily, exchangeTimeZone, exchangeTimeZone,
+                fillForward: false, extendedHours: false, isInternalFeed: false, isCustom: false, tickType: TickType.Quote);
+            var reader = new OptionUniverse();
+            var universe = new OptionUniverse { Symbol = canonical, Time = day };
+            using var stream = new StreamReader(new MemoryStream(Encoding.UTF8.GetBytes(csv)));
+            while (!stream.EndOfStream)
+            {
+                if (reader.Reader(config, stream, day, false) is BaseData point)
+                {
+                    universe.Add(point);
+                }
+            }
+            return universe;
         }
 
         /// <summary>
@@ -347,7 +538,7 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             }
             else if (securityType == SecurityType.Equity)
             {
-                // 09:30, not 09:00: a 09:00 hour bar would hold pre-market trades.
+                // 09:30, not 09:00: a 09:00 hour bar would hold pre-market trades. GetContractHistory builds the hour bars from minutes.
                 queryParameters[RequestParameters.StartTime] = "09:30:00";
                 queryParameters[RequestParameters.EndTime] = "16:00:00";
             }
@@ -356,6 +547,17 @@ namespace QuantConnect.Lean.DataSource.ThetaData
                 queryParameters[RequestParameters.StartTime] = "09:00:00";
                 queryParameters[RequestParameters.EndTime] = "16:15:00";
             }
+        }
+
+        /// <summary>
+        /// True for a canonical equity option or index option symbol, such as ?SPY or ?SPXW.
+        /// </summary>
+        internal static bool IsSupportedCanonicalOption(Symbol symbol)
+        {
+            return symbol.IsCanonical()
+                && (symbol.SecurityType == SecurityType.Option || symbol.SecurityType == SecurityType.IndexOption)
+                && symbol.HasUnderlying
+                && (symbol.Underlying.SecurityType == SecurityType.Equity || symbol.Underlying.SecurityType == SecurityType.Index);
         }
 
         private static List<BaseData> NotNull(IEnumerable<BaseData?> data) => data.Where(x => x != null).Select(x => x!).ToList();

@@ -73,6 +73,20 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.That(leanSymbol, Is.EqualTo(expectedLeanSymbol));
         }
 
+        [TestCase("SPXW", "SPX")]
+        [TestCase("SPX", "SPX")]
+        [TestCase("VIXW", "VIX")]
+        public void GetLeanSymbolMapsAStreamedIndexOptionRootToAnIndexOption(string root, string expectedUnderlying)
+        {
+            // A streamed contract that is not in the cache used to become an equity option on "SPXW".
+            var leanSymbol = ((ThetaDataSymbolMapper)_symbolMapper).GetLeanSymbol(root, ContractSecurityType.Option, "20221230", 3800000m, "C");
+
+            var underlying = Symbol.Create(expectedUnderlying, SecurityType.Index, Market.USA);
+            var expected = Symbol.CreateOption(underlying, root, Market.USA, OptionStyle.European, OptionRight.Call, 3800m, new DateTime(2022, 12, 30));
+            Assert.AreEqual(expected, leanSymbol);
+            Assert.AreEqual(SecurityType.IndexOption, leanSymbol.SecurityType);
+        }
+
         private Symbol CreateSymbol(ContractSecurityType contractSecurityType, string ticker, OptionRight? optionRight, decimal? strikePrice, DateTime? expirationDate, string market = Market.USA)
         {
             switch (contractSecurityType)

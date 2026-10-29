@@ -78,9 +78,8 @@ command, or the requests fail to connect.
   build number was not recorded.
 - .NET SDK 10. The projects target `net10.0`.
 - LEAN: the connector compiles against the NuGet package
-  `QuantConnect.Lean.Engine` 2.5.18208. The CLI runs used an engine image built
-  from LEAN master at `d4cac3751` (2026-10-16), plus 1 local LEAN commit about
-  canonical downloads that this change does not rely on.
+  `QuantConnect.Lean.Engine` 2.5.18208. The engine runs used
+  `lean-cli/engine:local`, built from the `Lean` checkout at `5f0a12b43`.
 
 ## Breaking changes
 
@@ -95,6 +94,8 @@ command, or the requests fail to connect.
   returns ranges of exactly `n` days. Before, each range held `n + 1` days.
 - A request that the plan denies returns null and logs 1 error. Before, it
   retried 2 times and then threw a generic exception.
+- A canonical option symbol, such as `?SPY`, now returns the data of the whole
+  chain. Before, it returned null.
 
 ## Features that need a paid plan
 
@@ -125,3 +126,5 @@ The v2 connector cannot run against Theta Terminal v3. To go back anyway:
 2. Run a Theta Terminal that still serves v2 on port 25510, if ThetaData still
    provides one.
 3. Rebuild the connector and the engine image.
+4. Remove the generated universe and option files from the data folder. The
+   v2 connector wrote fewer contracts, so mixed files give mixed results.

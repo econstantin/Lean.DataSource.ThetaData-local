@@ -19,6 +19,7 @@ using NUnit.Framework;
 using QuantConnect.Data;
 using QuantConnect.Securities;
 using QuantConnect.Data.Market;
+using QuantConnect.Data.UniverseSelection;
 
 namespace QuantConnect.Lean.DataSource.ThetaData.Tests
 {
@@ -65,24 +66,37 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         }
 
         [Test]
-        public void ListsTheSpyChain()
+        public void GetsOneDayOfTheSpyOptionChain()
         {
-            var chain = _provider.GetOptionChain(Spy, TradingDay).ToList();
+            // Test A of the smoke test: 1 day of SPY option end-of-day data.
+            var canonical = Symbol.CreateCanonicalOption(Spy);
+            var quotes = _provider.GetHistory(Request(canonical, typeof(QuoteBar), TickType.Quote, TradingDay, TradingDay.AddDays(1)))!.Cast<QuoteBar>().ToList();
+            var trades = _provider.GetHistory(Request(canonical, typeof(TradeBar), TickType.Trade, TradingDay, TradingDay.AddDays(1)))!.Cast<TradeBar>().ToList();
 
-            TestContext.Out.WriteLine($"chain {chain.Count} contracts, {chain.Select(x => x.ID.Date).Distinct().Count()} expirations");
-            Assert.That(chain.Count, Is.GreaterThan(1000));
-            Assert.That(chain.All(x => x.SecurityType == SecurityType.Option && x.Underlying == Spy && x.ID.StrikePrice > 0 && x.ID.Date >= TradingDay));
-            Assert.That(chain.Select(x => x.ID.OptionRight).Distinct().Count(), Is.EqualTo(2));
+            TestContext.Out.WriteLine($"SPY {TradingDay:yyyy-MM-dd}: {quotes.Count} quote bars, {trades.Count} trade bars, " +
+                $"{quotes.Select(x => x.Symbol.ID.Date).Distinct().Count()} expirations, first {quotes.First().Symbol.Value}");
+            Assert.That(quotes.Count, Is.GreaterThan(1000));
+            Assert.That(trades.Count, Is.GreaterThan(100).And.LessThanOrEqualTo(quotes.Count + 1000));
+            Assert.That(quotes.All(x => x.Time == TradingDay && x.Period == Time.OneDay));
+            Assert.That(quotes.All(x => x.Symbol.SecurityType == SecurityType.Option && x.Symbol.Underlying == Spy && x.Symbol.ID.OptionStyle == OptionStyle.American));
+            Assert.That(quotes.All(x => x.Symbol.ID.StrikePrice > 0 && x.Symbol.ID.Date >= TradingDay));
+            Assert.That(quotes.All(x => (x.Bid == null || x.Bid.Close > 0) && (x.Ask == null || x.Ask.Close > 0) && (x.Bid != null || x.Ask != null)));
+            Assert.That(quotes.Where(x => x.Bid != null && x.Ask != null).All(x => x.Bid.Close <= x.Ask.Close), "crossed quote");
+            Assert.That(trades.All(x => x.Low > 0 && x.High >= x.Low && x.Volume > 0));
+            Assert.AreEqual(quotes.Count, quotes.Select(x => x.Symbol).Distinct().Count(), "duplicate contract");
+            Assert.That(quotes.Select(x => x.Symbol.ID.OptionRight).Distinct().Count(), Is.EqualTo(2));
         }
 
         [Test]
-        public void GetsAnOptionContractDailyQuote()
+        public void ListsTheSpyChainAndBuildsTheUniverse()
         {
-            var contract = _provider.GetOptionChain(Spy, TradingDay).First(x => x.ID.Date > TradingDay.AddDays(20) && x.ID.StrikePrice > 600m && x.ID.StrikePrice < 800m);
-            var quotes = _provider.GetHistory(Request(contract, typeof(QuoteBar), TickType.Quote, TradingDay, TradingDay.AddDays(1)))!.Cast<QuoteBar>().ToList();
+            var chain = _provider.GetOptionChain(Spy, TradingDay).ToList();
+            var universe = (OptionUniverse)_provider.GetHistory(Request(Symbol.CreateCanonicalOption(Spy), typeof(OptionUniverse), TickType.Quote, TradingDay, TradingDay.AddDays(1)))!.Single();
 
-            Assert.AreEqual(1, quotes.Count);
-            Assert.That(quotes.All(x => x.Time == TradingDay && x.Bid.Close > 0 && x.Ask.Close >= x.Bid.Close));
+            TestContext.Out.WriteLine($"chain {chain.Count} contracts, universe {universe.Data.Count} contracts, underlying close {universe.Underlying?.Price}");
+            Assert.That(chain.Count, Is.GreaterThan(1000));
+            Assert.That(universe.Data.Count, Is.GreaterThan(1000).And.LessThanOrEqualTo(chain.Count));
+            Assert.That(universe.Underlying?.Price, Is.GreaterThan(0));
         }
 
         [Test]

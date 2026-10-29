@@ -44,6 +44,16 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         private volatile bool _useEndOfDayReport;
 
         /// <summary>
+        /// True after the contract list answered a recent date. A later denial is then for its date, not for the plan.
+        /// </summary>
+        private volatile bool _planIncludesContractList;
+
+        /// <summary>
+        /// Indicates whether the trace for a denied date of the contract list has been fired.
+        /// </summary>
+        private volatile bool _dateDenialTraceFired;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ThetaDataOptionChainProvider"/>
         /// </summary>
         /// <param name="symbolMapper">The TheData mapping between Lean symbols and brokerage specific symbols.</param>
@@ -88,19 +98,62 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             {
                 try
                 {
-                    return _restApiClient.GetRows<ContractListRow>(ThetaDataEndpoints.OptionListContractsQuote, new Dictionary<string, string>
-                    {
-                        [RequestParameters.Symbol] = root,
-                        [RequestParameters.Date] = date.ConvertToThetaDataDateFormat()
-                    }).Select(row => row.ToContract()).ToList();
+                    return GetContractList(root, date);
                 }
                 catch (ThetaDataRequestException e) when (e.IsEntitlementError)
                 {
-                    _useEndOfDayReport = true;
-                    Log.Trace($"{nameof(ThetaDataOptionChainProvider)}: The plan does not include the contract list, so the chain comes from the end-of-day report. {e.Message}");
+                    if (!_planIncludesContractList && IsPlanDenial(root, date))
+                    {
+                        _useEndOfDayReport = true;
+                        Log.Trace($"{nameof(ThetaDataOptionChainProvider)}: The plan does not include the contract list, so the chain comes from the end-of-day report. {e.Message}");
+                    }
+                    else if (!_dateDenialTraceFired)
+                    {
+                        _dateDenialTraceFired = true;
+                        Log.Trace($"{nameof(ThetaDataOptionChainProvider)}: The plan denies the contract list of {root} on {date:yyyy-MM-dd}. The chain of each denied date comes from the end-of-day report. {e.Message}");
+                    }
                 }
             }
             return _endOfDayLoader.GetRows(root, date).Select(row => row.Contract!).ToList();
+        }
+
+        private List<ThetaDataContract> GetContractList(string root, DateTime date)
+        {
+            return _restApiClient.GetRows<ContractListRow>(ThetaDataEndpoints.OptionListContractsQuote, new Dictionary<string, string>
+            {
+                [RequestParameters.Symbol] = root,
+                [RequestParameters.Date] = date.ConvertToThetaDataDateFormat()
+            }).Select(row => row.ToContract()).ToList();
+        }
+
+        /// <summary>
+        /// Tells a denial of the plan from a denial of 1 date: it sends the request again for the last weekday before today.
+        /// </summary>
+        /// <remarks>
+        /// A plan can include the contract list but not an old date. That denial must not turn off the list for every date.
+        /// </remarks>
+        private bool IsPlanDenial(string root, DateTime deniedDate)
+        {
+            var probeDate = DateTime.UtcNow.ConvertFromUtc(TimeZones.NewYork).Date.AddDays(-1);
+            while (probeDate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+            {
+                probeDate = probeDate.AddDays(-1);
+            }
+            if (probeDate == deniedDate.Date)
+            {
+                return true;
+            }
+            try
+            {
+                // A holiday gives no data (HTTP 472), not a denial, so it also shows that the plan includes the list.
+                GetContractList(root, probeDate);
+                _planIncludesContractList = true;
+                return false;
+            }
+            catch (ThetaDataRequestException e) when (e.IsEntitlementError)
+            {
+                return true;
+            }
         }
     }
 }

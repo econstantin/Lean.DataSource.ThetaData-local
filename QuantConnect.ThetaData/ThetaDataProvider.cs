@@ -71,6 +71,11 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         private ISubscriptionPlan _userSubscriptionPlan;
 
         /// <summary>
+        /// The most requests the client sends at the same time: the <c>thetadata-max-concurrent-requests</c> config key, or the plan's limit.
+        /// </summary>
+        internal int MaxConcurrentRequests { get; private set; }
+
+        /// <summary>
         /// Indicates whether the user's subscription plan allows access to real-time updates on quote and trade channels.
         /// </summary>
         private bool _streamingAvailable = false;
@@ -285,7 +290,7 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             }
             else
             {
-                Log.Error($"{nameof(ThetaDataProvider)}.{nameof(GetUserSubscriptionPlan)}: Insufficient permissions to access or modify subscription plan for the user. Streaming service is not available for this user.");
+                Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(GetUserSubscriptionPlan)}: The ThetaData {parsedPricePlan} plan includes no streaming, so live data subscriptions are off. History requests still work.");
             }
 
             return userSubscriptionPlan;
@@ -313,8 +318,8 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             _initialized = true;
 
             // ThetaData rejects more concurrent requests than the plan allows: https://thetadata.net/docs/Articles/Data-And-Requests/Concurrent-Requests.html
-            var maxConcurrentRequests = Config.GetInt("thetadata-max-concurrent-requests", _userSubscriptionPlan.MaxConcurrentRequests);
-            _restApiClient = restApiClient ?? new ThetaDataRestApiClient(_userSubscriptionPlan.RateGate, maxConcurrentRequests);
+            MaxConcurrentRequests = Config.GetInt("thetadata-max-concurrent-requests", _userSubscriptionPlan.MaxConcurrentRequests);
+            _restApiClient = restApiClient ?? new ThetaDataRestApiClient(_userSubscriptionPlan.RateGate, MaxConcurrentRequests);
             _optionEndOfDayLoader = new ThetaDataOptionEndOfDayLoader(_restApiClient);
             _symbolMapper = new ThetaDataSymbolMapper();
 

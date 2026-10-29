@@ -25,14 +25,14 @@ using QuantConnect.Securities;
 using QuantConnect.Data.Market;
 using QuantConnect.Configuration;
 using System.Collections.Generic;
+using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Lean.DataSource.ThetaData.Models.Rest;
 
 namespace QuantConnect.Lean.DataSource.ThetaData.Tests
 {
     /// <summary>
-    /// The history provider and chain provider on recorded v3 responses of the Free plan. No Theta Terminal is needed.
-    /// The provider checks the QuantConnect module license when it starts, as before, so these tests need the
-    /// QC_JOB_USER_ID and QC_API_ACCESS_TOKEN environment variables that CI sets.
+    /// The history provider, downloader, and chain provider on recorded v3 responses of the Free plan.
+    /// No terminal, account, or network is needed.
     /// </summary>
     [TestFixture]
     public class ThetaDataV3HistoryTests
@@ -109,14 +109,21 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             // That is 2026-10-19 20:00 to 2026-10-20 20:00 ET, and it must return the bar of 2026-10-20.
             var (provider, _) = CreateProvider();
             using var __ = provider;
-            var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, Spy, SecurityType.Equity);
-            var request = new HistoryRequest(new DateTime(2026, 10, 20), new DateTime(2026, 10, 21), typeof(TradeBar), Spy, Resolution.Daily,
-                exchangeHours, exchangeHours.TimeZone, Resolution.Daily, true, false, DataNormalizationMode.Raw, TickType.Trade);
+            foreach (var (symbol, dataType, tickType, expected) in new[]
+            {
+                (Spy, typeof(TradeBar), TickType.Trade, 1),
+                (CanonicalSpy, typeof(QuoteBar), TickType.Quote, 6)
+            })
+            {
+                var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, symbol, symbol.SecurityType);
+                var request = new HistoryRequest(new DateTime(2026, 10, 20), new DateTime(2026, 10, 21), dataType, symbol, Resolution.Daily,
+                    exchangeHours, exchangeHours.TimeZone, Resolution.Daily, true, false, DataNormalizationMode.Raw, tickType);
 
-            var history = provider.GetHistory(request)!.ToList();
+                var history = provider.GetHistory(request)!.ToList();
 
-            Assert.AreEqual(1, history.Count);
-            Assert.AreEqual(new DateTime(2026, 10, 20), history[0].Time);
+                Assert.AreEqual(expected, history.Count, symbol.ToString());
+                Assert.That(history.All(x => x.Time == new DateTime(2026, 10, 20)), symbol.ToString());
+            }
         }
 
         [Test]
@@ -165,6 +172,139 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         }
 
         [Test]
+        public void GetsTheWholeChainForACanonicalSymbolInOneRequest()
+        {
+            // Issue #12: ?SPY used to return null with "Unsupported SecurityType 'Option' for symbol '?SPY'".
+            var (provider, handler) = CreateProvider();
+            using var _ = provider;
+
+            var quotes = provider.GetHistory(CreateRequest(CanonicalSpy, typeof(QuoteBar), TickType.Quote, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)))!.ToList();
+            var trades = provider.GetHistory(CreateRequest(CanonicalSpy, typeof(TradeBar), TickType.Trade, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)))!.ToList();
+
+            Assert.AreEqual(6, quotes.Count, "every contract with a bid or an ask");
+            Assert.AreEqual(4, trades.Count, "every contract that traded");
+            Assert.That(quotes.Concat(trades).All(x => x.Symbol.Underlying == Spy && !x.Symbol.IsCanonical()));
+            var zeroDtePut = quotes.Cast<QuoteBar>().Single(x => x.Symbol.ID.Date == new DateTime(2026, 10, 20) && x.Symbol.ID.OptionRight == OptionRight.Put);
+            Assert.IsNull(zeroDtePut.Bid);
+            Assert.AreEqual(0.01m, zeroDtePut.Ask.Close);
+
+            // The quote and trade data of the day share 1 bulk request.
+            var bulk = handler.Requests.Where(x => x.Path == "option/history/eod").ToList();
+            Assert.AreEqual(1, bulk.Count);
+            Assert.AreEqual("*", bulk[0].Query["expiration"]);
+            Assert.AreEqual("20261020", bulk[0].Query["start_date"]);
+            Assert.AreEqual("20261020", bulk[0].Query["end_date"]);
+        }
+
+        [Test]
+        public void BuildsTheOptionUniverseForACanonicalHistoryRequest()
+        {
+            // Issue #12: QCAlgorithm.OptionChain calls History(?SPY, 1) with the OptionUniverse type.
+            var (provider, _) = CreateProvider();
+            using var __ = provider;
+
+            var history = provider.GetHistory(CreateRequest(CanonicalSpy, typeof(OptionUniverse), TickType.Quote, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)))!.ToList();
+
+            var universe = (OptionUniverse)history.Single();
+            Assert.AreEqual(CanonicalSpy, universe.Symbol);
+            Assert.AreEqual(new DateTime(2026, 10, 20), universe.Time);
+            Assert.AreEqual(new DateTime(2026, 10, 21), universe.EndTime);
+            Assert.AreEqual(6, universe.Data.Count);
+            Assert.AreEqual(Spy, universe.Underlying.Symbol);
+            var expectedUnderlying = ThetaDataRestApiClient.ParseRows<EndOfDayRow>(FakeThetaDataHandler.ReadFixture("stock_eod_spy_20261019_20261020.json"))[1];
+            Assert.AreEqual(expectedUnderlying.Close, universe.Underlying.Price);
+
+            var contract = universe.Data.Cast<OptionUniverse>().Single(x => x.Symbol.ID.StrikePrice == 380m && x.Symbol.ID.OptionRight == OptionRight.Put);
+            Assert.AreEqual(new DateTime(2028, 1, 21), contract.Symbol.ID.Date);
+            Assert.That(contract.Close, Is.GreaterThan(0));
+        }
+
+        [Test]
+        public void BuildsRegularSessionEquityHourBarsOnTheClockHour()
+        {
+            // The request starts at 09:30. The first hour bar must be 09:00 to 10:00, as LEAN's own hour bars are.
+            static string Minute(string time, decimal open, decimal high, decimal low, decimal close, int volume) =>
+                $"{{\"timestamp\":\"2026-10-20T{time}:00.000\",\"open\":{open},\"high\":{high},\"low\":{low},\"close\":{close},\"volume\":{volume},\"count\":1}}";
+            var (provider, handler) = CreateProvider(request => request.Path == "stock/history/ohlc"
+                ? FakeThetaDataHandler.Respond(200, "{\"response\":[" + string.Join(",",
+                    Minute("09:30", 10.0m, 10.5m, 9.9m, 10.2m, 100), Minute("09:59", 10.2m, 11.0m, 10.1m, 10.8m, 50), Minute("10:00", 10.8m, 10.9m, 10.6m, 10.7m, 30)) + "]}")
+                : FakeThetaDataHandler.Respond(472, "No data found for your request"), plan: "Value");
+            using var _ = provider;
+            var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, Spy, SecurityType.Equity);
+            var request = new HistoryRequest(new DateTime(2026, 10, 20).ConvertToUtc(exchangeHours.TimeZone), new DateTime(2026, 10, 21).ConvertToUtc(exchangeHours.TimeZone),
+                typeof(TradeBar), Spy, Resolution.Hour, exchangeHours, exchangeHours.TimeZone, Resolution.Hour, false, false, DataNormalizationMode.Raw, TickType.Trade);
+
+            var bars = provider.GetHistory(request)!.Cast<TradeBar>().ToList();
+
+            Assert.AreEqual("1m", handler.Requests.Single(x => x.Path == "stock/history/ohlc").Query["interval"]);
+            Assert.AreEqual(2, bars.Count);
+            Assert.AreEqual((new DateTime(2026, 10, 20, 9, 0, 0), new DateTime(2026, 10, 20, 10, 0, 0)), (bars[0].Time, bars[0].EndTime));
+            Assert.AreEqual((10.0m, 11.0m, 9.9m, 10.8m, 150m), (bars[0].Open, bars[0].High, bars[0].Low, bars[0].Close, bars[0].Volume));
+            Assert.AreEqual((new DateTime(2026, 10, 20, 10, 0, 0), 30m), (bars[1].Time, bars[1].Volume));
+        }
+
+        [Test]
+        public void BuildsTheOptionUniverseWithOpenInterestWhenThePlanIncludesIt()
+        {
+            // The row shape comes from the v3 spec. The Free plan denies open interest, so no recorded response exists.
+            var (provider, handler) = CreateProvider(request => request.Path == "option/history/open_interest"
+                ? FakeThetaDataHandler.Respond(200,
+                    "{\"response\":[{\"contract\":{\"symbol\":\"SPY\",\"expiration\":\"2026-10-20\",\"right\":\"CALL\",\"strike\":760.0},\"data\":[{\"timestamp\":\"2026-10-20T06:30:00.000\",\"open_interest\":1234}]}]}")
+                : FreePlanTerminal(request), plan: "Standard");
+            using var _ = provider;
+
+            var universe = (OptionUniverse)provider.GetHistory(CreateRequest(CanonicalSpy, typeof(OptionUniverse), TickType.Quote, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)))!.Single();
+
+            var call = universe.Data.Cast<OptionUniverse>().Single(x => x.Symbol.ID.StrikePrice == 760m && x.Symbol.ID.OptionRight == OptionRight.Call);
+            Assert.AreEqual(1234m, call.OpenInterest);
+            Assert.That(call.Close, Is.GreaterThan(0), "open interest adds to the row, it does not replace the prices");
+            Assert.AreEqual(1, handler.Requests.Count(x => x.Path == "option/history/open_interest" && x.Query["expiration"] == "*"));
+        }
+
+        [Test]
+        public void SendsTheDeniedUniverseOpenInterestRequestOnce()
+        {
+            var (provider, handler) = CreateProvider();
+            using var _ = provider;
+
+            for (var i = 0; i < 2; i++)
+            {
+                Assert.IsNotNull(provider.GetHistory(CreateRequest(CanonicalSpy, typeof(OptionUniverse), TickType.Quote, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)))!.Single());
+            }
+
+            Assert.AreEqual(1, handler.Requests.Count(x => x.Path == "option/history/open_interest"));
+        }
+
+        [Test]
+        public void BuildsTheOptionUniverseWhenThePlanDeniesTheUnderlying()
+        {
+            // The v3 docs say the Free plan has no index data. A denied underlying must not drop the contracts of the day.
+            var (provider, _) = CreateProvider(request => request.Path == "stock/history/eod"
+                ? FakeThetaDataHandler.Respond(403, FreePlanDenial)
+                : FreePlanTerminal(request));
+            using var __ = provider;
+
+            var history = provider.GetHistory(CreateRequest(CanonicalSpy, typeof(OptionUniverse), TickType.Quote, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21)))!.ToList();
+
+            var universe = (OptionUniverse)history.Single();
+            Assert.AreEqual(6, universe.Data.Count);
+            Assert.IsNull(universe.Underlying);
+        }
+
+        [Test]
+        public void DoesNotReturnTheUniverseOfADayBeforeThatDayEnds()
+        {
+            // The universe of 2026-10-20 holds the end-of-day report of that day, so it is not available at 18:00 the same day.
+            var (provider, handler) = CreateProvider();
+            using var _ = provider;
+
+            var history = provider.GetHistory(CreateRequest(CanonicalSpy, typeof(OptionUniverse), TickType.Quote, new DateTime(2026, 10, 20), new DateTime(2026, 10, 20, 18, 0, 0)));
+
+            Assert.That(history, Is.Null.Or.Empty);
+            Assert.IsEmpty(handler.Requests.Where(x => x.Path == "option/history/eod"));
+        }
+
+        [Test]
         public void ListsTheChainFromTheEndOfDayReportOnTheFreePlan()
         {
             var (provider, handler) = CreateProvider();
@@ -176,7 +316,28 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.AreEqual(6, first.Count);
             CollectionAssert.AreEquivalent(first, second);
             Assert.That(first.All(x => x.SecurityType == SecurityType.Option && x.Underlying == Spy && x.ID.OptionStyle == OptionStyle.American));
-            Assert.AreEqual(1, handler.Requests.Count(x => x.Path == "option/list/contracts/quote"), "the denied request is not sent again");
+            // The first denial and 1 request for a recent date show a plan denial. The request is then not sent again.
+            Assert.AreEqual(2, handler.Requests.Count(x => x.Path == "option/list/contracts/quote"), "the denied request is not sent again");
+        }
+
+        [Test]
+        public void KeepsTheContractListWhenThePlanDeniesOnlyAnOldDate()
+        {
+            // A paid plan can include the contract list but not an old date. That denial must not turn off the list for every date.
+            var (provider, handler) = CreateProvider(request => request.Path == "option/list/contracts/quote"
+                ? string.CompareOrdinal(request.Query["date"], "20250101") < 0
+                    ? FakeThetaDataHandler.Respond(403, "Your subscription does not include this date.")
+                    : FakeThetaDataHandler.Respond(200,
+                        "{\"response\":[{\"symbol\":\"SPY\",\"expiration\":\"2026-11-20\",\"strike\":700.000,\"right\":\"CALL\"},{\"symbol\":\"SPY\",\"expiration\":\"2026-11-20\",\"strike\":700.000,\"right\":\"PUT\"}]}")
+                : FreePlanTerminal(request), plan: "Value");
+            using var _ = provider;
+
+            var old = provider.GetOptionChain(Spy, new DateTime(2024, 1, 2)).ToList();
+            var recent = provider.GetOptionChain(Spy, new DateTime(2026, 10, 20)).ToList();
+
+            Assert.IsEmpty(old, "the end-of-day report of the fake terminal has no data for 2024-01-02");
+            Assert.AreEqual(2, recent.Count, "the recent chain comes from the contract list, not from the 6-contract report");
+            Assert.AreEqual(3, handler.Requests.Count(x => x.Path == "option/list/contracts/quote"), "the old date, the check of a recent date, and 2026-10-20");
         }
 
         [Test]
@@ -192,6 +353,23 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         }
 
         [Test]
+        public void DownloaderReturnsEmptyNotNullForADeniedChainRequest()
+        {
+            // LEAN's CanonicalDataDownloaderDecorator treats null as "canonical not supported" and falls back to
+            // LiveOptionChainProvider, which calls QuantConnect's servers. A backtest stopped there for minutes.
+            var (provider, handler) = CreateProvider();
+            using var downloader = new ThetaDataDownloader(provider);
+            var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, CanonicalSpy, SecurityType.Option);
+
+            var data = downloader.Get(new DataDownloaderGetParameters(CanonicalSpy, Resolution.Daily,
+                new DateTime(2026, 10, 20).ConvertToUtc(exchangeHours.TimeZone), new DateTime(2026, 10, 21).ConvertToUtc(exchangeHours.TimeZone), TickType.OpenInterest));
+
+            Assert.IsNotNull(data);
+            Assert.IsEmpty(data!);
+            Assert.AreEqual(1, handler.Requests.Count(x => x.Path == "option/history/open_interest"));
+        }
+
+        [Test]
         public void ThrowsWhenTheTerminalFails()
         {
             // A failed request must not look like an empty result.
@@ -201,5 +379,114 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.Throws<ThetaDataRequestException>(() => provider.GetHistory(CreateRequest(Spy, typeof(TradeBar), TickType.Trade, new DateTime(2026, 10, 19), new DateTime(2026, 10, 21))));
         }
 
+        [Test]
+        public void IntradayCanonicalDownloadKeepsTheFirstDataPoint()
+        {
+            // The old downloader called Any() on the consuming enumerable, which removed the first item.
+            var bar = "{\"timestamp\":\"2026-10-20T09:30:00.000\",\"open\":1.00,\"high\":1.10,\"low\":0.90,\"close\":1.05,\"volume\":10,\"count\":2}";
+            var (provider, _) = CreateProvider(request => request.Path switch
+            {
+                "option/list/contracts/quote" => FakeThetaDataHandler.Respond(200,
+                    "{\"response\":[{\"symbol\":\"SPY\",\"expiration\":\"2026-11-20\",\"strike\":700.000,\"right\":\"CALL\"},{\"symbol\":\"SPY\",\"expiration\":\"2026-11-20\",\"strike\":700.000,\"right\":\"PUT\"}]}"),
+                "option/history/ohlc" => FakeThetaDataHandler.Respond(200,
+                    $"{{\"response\":[{{\"contract\":{{\"symbol\":\"SPY\",\"expiration\":\"2026-11-20\",\"right\":\"{request.Query["right"]!.ToUpperInvariant()}\",\"strike\":700.000}},\"data\":[{bar}]}}]}}"),
+                _ => FakeThetaDataHandler.Respond(472, "No data found for your request")
+            }, plan: "Pro");
+            using var downloader = new ThetaDataDownloader(provider);
+            var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, CanonicalSpy, SecurityType.Option);
+
+            var data = downloader.Get(new DataDownloaderGetParameters(CanonicalSpy, Resolution.Minute,
+                new DateTime(2026, 10, 20).ConvertToUtc(exchangeHours.TimeZone), new DateTime(2026, 10, 21).ConvertToUtc(exchangeHours.TimeZone), TickType.Trade))!.ToList();
+
+            Assert.AreEqual(2, data.Count);
+            CollectionAssert.AreEquivalent(new[] { OptionRight.Call, OptionRight.Put }, data.Select(x => x.Symbol.ID.OptionRight));
+        }
+
+        [Test]
+        public void WritesDailyOptionFilesThatLeanReadsBack()
+        {
+            var handler = new FakeThetaDataHandler(FreePlanTerminal);
+            using var client = new ThetaDataRestApiClient("http://127.0.0.1:25503", null, 1, handler, _ => TimeSpan.Zero, 1);
+            var dataFolder = Path.Combine(Path.GetTempPath(), "thetadata-writer-" + Guid.NewGuid().ToString("N"));
+            var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, CanonicalSpy, SecurityType.Option);
+            try
+            {
+                var writer = new ThetaDataOptionDataWriter(client, dataFolder);
+                var summary = writer.Write(CanonicalSpy, new DateTime(2026, 10, 20), new DateTime(2026, 10, 20), exchangeHours);
+                // Writing the same day again replaces its bars instead of adding a second line.
+                writer.Write(CanonicalSpy, new DateTime(2026, 10, 20), new DateTime(2026, 10, 20), exchangeHours);
+
+                Assert.AreEqual((1, 1, 6, 4, 6), (summary.Days, summary.UniverseFiles, summary.Contracts, summary.TradeBars, summary.QuoteBars));
+                var daily = Path.Combine(dataFolder, "option", "usa", "daily");
+                var trades = new QuantConnect.ToolBox.LeanDataReader(Path.Combine(daily, "spy_2026_trade_american.zip")).Parse().Cast<TradeBar>().ToList();
+                var quotes = new QuantConnect.ToolBox.LeanDataReader(Path.Combine(daily, "spy_2026_quote_american.zip")).Parse().Cast<QuoteBar>().ToList();
+
+                Assert.AreEqual(4, trades.Count);
+                Assert.AreEqual(6, quotes.Count);
+                Assert.That(trades.Concat<BaseData>(quotes).All(x => x.Time == new DateTime(2026, 10, 20)));
+                var expected = ThetaDataRestApiClient.ParseRows<EndOfDayRow>(FakeThetaDataHandler.ReadFixture("option_eod_spy_bulk_20261020_sample.json"))
+                    .Single(x => x.Contract!.Strike == 760m && x.Contract.Right == "CALL");
+                var call = trades.Single(x => x.Symbol.ID.StrikePrice == 760m && x.Symbol.ID.OptionRight == OptionRight.Call);
+                Assert.AreEqual((expected.Open, expected.High, expected.Low, expected.Close, expected.Volume), (call.Open, call.High, call.Low, call.Close, call.Volume));
+                var put = quotes.Single(x => x.Symbol.ID.StrikePrice == 760m && x.Symbol.ID.OptionRight == OptionRight.Put);
+                Assert.AreEqual(0.01m, put.Ask.Close);
+                Assert.That(put.Bid == null || put.Bid.Close == 0m, "the missing bid stays missing");
+
+                var universe = File.ReadAllLines(Path.Combine(dataFolder, "option", "usa", "universes", "spy", "20261020.csv"));
+                Assert.AreEqual(1 + 1 + 6, universe.Length);
+            }
+            finally
+            {
+                if (Directory.Exists(dataFolder))
+                {
+                    Directory.Delete(dataFolder, true);
+                }
+            }
+        }
+
+        [Test]
+        public void LeanWritesAUniverseFileFromTheDownloader()
+        {
+            // Issue #9: a backtest gets its option chain from data/option/usa/universes/<root>/<date>.csv, which LEAN's
+            // RunUniverseDownloader writes from the downloader. Before this change the folder had to exist already.
+            var exchangeHours = MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, CanonicalSpy, SecurityType.Option);
+            var (provider, _) = CreateProvider();
+            using var downloader = new ThetaDataDownloader(provider);
+            var dataFolder = Path.Combine(Path.GetTempPath(), "thetadata-universe-" + Guid.NewGuid().ToString("N"));
+            // LEAN reloads the market hours from the data folder, so the temp folder needs them. It has no universes folder.
+            foreach (var folder in new[] { "market-hours", "symbol-properties" })
+            {
+                var target = Directory.CreateDirectory(Path.Combine(dataFolder, folder));
+                foreach (var file in Directory.GetFiles(Path.Combine(Globals.DataFolder, folder)))
+                {
+                    File.Copy(file, Path.Combine(target.FullName, Path.GetFileName(file)));
+                }
+            }
+            var previousDataFolder = Config.Get("data-folder");
+            Config.Set("data-folder", dataFolder);
+            Globals.Reset();
+            try
+            {
+                UniverseExtensions.RunUniverseDownloader(downloader,
+                    new DataUniverseDownloaderGetParameters(CanonicalSpy, new DateTime(2026, 10, 20), new DateTime(2026, 10, 21), exchangeHours));
+
+                var file = Path.Combine(dataFolder, "option", "usa", "universes", "spy", "20261020.csv");
+                Assert.IsTrue(File.Exists(file), file);
+                var lines = File.ReadAllLines(file);
+                Assert.That(lines[0], Does.StartWith("#expiry,strike,right,open,high,low,close,volume,open_interest"));
+                Assert.That(lines[1], Does.StartWith(","), "the underlying line comes first");
+                Assert.AreEqual(1 + 1 + 6, lines.Length, "header, SPY, and 6 contracts");
+                Assert.That(lines.Skip(2).All(x => char.IsDigit(x[0])));
+            }
+            finally
+            {
+                Config.Set("data-folder", previousDataFolder);
+                Globals.Reset();
+                if (Directory.Exists(dataFolder))
+                {
+                    Directory.Delete(dataFolder, true);
+                }
+            }
+        }
     }
 }

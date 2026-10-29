@@ -25,7 +25,8 @@ using QuantConnect.Lean.DataSource.ThetaData.Models.Rest;
 namespace QuantConnect.Lean.DataSource.ThetaData.Tests
 {
     /// <summary>
-    /// Zero and missing values in v3 rows. A row with no observation gives no data. No price is invented.
+    /// Zero and missing values in v3 rows (issue #11). A valid observation with a 0 field is kept.
+    /// A row with no observation gives no data. No price is invented.
     /// </summary>
     [TestFixture]
     public class ThetaDataBarConverterTests
@@ -76,6 +77,39 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         }
 
         [Test]
+        public void DailyQuoteBarKeepsAOneSidedQuote()
+        {
+            // SPY 2026-10-20 760 put on its expiration day: bid 0, ask 0.01. The old code dropped this bar.
+            var bar = ThetaDataBarConverter.ToDailyQuoteBar(Eod(0.05m, 0.31m, 0.01m, 0.01m, 1616m, 254, 0m, 0m, 0.01m, 380m), Contract, TimeZones.NewYork)!;
+
+            Assert.IsNotNull(bar);
+            Assert.IsNull(bar.Bid, "no bid is not a bid of 0");
+            Assert.AreEqual(0.01m, bar.Ask.Close);
+            Assert.AreEqual(380m, bar.LastAskSize);
+            Assert.AreEqual(0m, bar.LastBidSize);
+            Assert.AreEqual(new DateTime(2026, 10, 20), bar.Time);
+            Assert.AreEqual(Time.OneDay, bar.Period);
+        }
+
+        [Test]
+        public void HourQuoteBarsKeepAOneSidedHour()
+        {
+            var start = new DateTime(2026, 10, 20, 9, 30, 0);
+            var minutes = new[]
+            {
+                ThetaDataBarConverter.ToQuoteBar(new QuoteRow { Timestamp = start, Ask = 0.05m, AskSize = 10m }, Contract, Time.OneMinute, TimeZones.NewYork)!,
+                ThetaDataBarConverter.ToQuoteBar(new QuoteRow { Timestamp = start.AddMinutes(1), Ask = 0.07m, AskSize = 4m }, Contract, Time.OneMinute, TimeZones.NewYork)!
+            };
+
+            var hour = (QuoteBar)ThetaDataBarConverter.ToHourBars(minutes).Single();
+
+            Assert.AreEqual(new DateTime(2026, 10, 20, 9, 0, 0), hour.Time);
+            Assert.AreEqual(Time.OneHour, hour.Period);
+            Assert.IsNull(hour.Bid, "no minute had a bid");
+            Assert.AreEqual((0.05m, 0.07m, 0.05m, 0.07m, 4m), (hour.Ask.Open, hour.Ask.High, hour.Ask.Low, hour.Ask.Close, hour.LastAskSize));
+        }
+
+        [Test]
         public void DailyQuoteBarIsKeptWhenTheContractDidNotTrade()
         {
             var bar = ThetaDataBarConverter.ToDailyQuoteBar(Eod(0m, 0m, 0m, 0m, 0m, 0, 153.38m, 200m, 153.93m, 200m), Contract, TimeZones.NewYork)!;
@@ -87,14 +121,13 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         [TestCase(0, 0, 0, 0)]
         [TestCase(0, 200, 0, 200)]
         [TestCase(1.5, 0, 0, 0)]
-        [TestCase(0, 0, 0.01, 380)]
-        public void DailyQuoteBarIsNullWithoutBothSides(decimal bid, decimal bidSize, decimal ask, decimal askSize)
+        public void DailyQuoteBarIsNullWithoutAQuote(decimal bid, decimal bidSize, decimal ask, decimal askSize)
         {
             Assert.IsNull(ThetaDataBarConverter.ToDailyQuoteBar(Eod(0m, 0m, 0m, 0m, 0m, 0, bid, bidSize, ask, askSize), Contract, TimeZones.NewYork));
         }
 
         [Test]
-        public void IntradayBarsSkipEmptyIntervals()
+        public void IntradayBarsSkipEmptyIntervalsAndKeepOneSidedQuotes()
         {
             var start = new DateTime(2026, 10, 20, 9, 30, 0);
             Assert.IsNull(ThetaDataBarConverter.ToTradeBar(new OhlcRow { Timestamp = start }, Contract, Time.OneMinute, TimeZones.NewYork));
@@ -103,10 +136,9 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.AreEqual(start, trade.Time);
             Assert.AreEqual(start.AddMinutes(1), trade.EndTime);
 
-            var quote = ThetaDataBarConverter.ToQuoteBar(new QuoteRow { Timestamp = start, Bid = 0.04m, BidSize = 5m, Ask = 0.05m, AskSize = 10m }, Contract, Time.OneMinute, TimeZones.NewYork)!;
-            Assert.AreEqual(0.04m, quote.Bid.Close);
+            var quote = ThetaDataBarConverter.ToQuoteBar(new QuoteRow { Timestamp = start, Ask = 0.05m, AskSize = 10m }, Contract, Time.OneMinute, TimeZones.NewYork)!;
+            Assert.IsNull(quote.Bid);
             Assert.AreEqual(0.05m, quote.Ask.Close);
-            Assert.AreEqual(start.AddMinutes(1), quote.EndTime);
 
             Assert.IsNull(ThetaDataBarConverter.ToQuoteBar(new QuoteRow { Timestamp = start }, Contract, Time.OneMinute, TimeZones.NewYork));
         }
@@ -118,9 +150,9 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             Assert.IsNull(ThetaDataBarConverter.ToTradeTick(new TradeRow { Timestamp = time, Price = 0m, Size = 1m }, Contract, TimeZones.NewYork));
             Assert.IsNull(ThetaDataBarConverter.ToQuoteTick(new QuoteRow { Timestamp = time }, Contract, TimeZones.NewYork));
 
-            var tick = ThetaDataBarConverter.ToQuoteTick(new QuoteRow { Timestamp = time, Bid = 1.1m, BidSize = 5m, Ask = 1.2m, AskSize = 3m }, Contract, TimeZones.NewYork)!;
+            var tick = ThetaDataBarConverter.ToQuoteTick(new QuoteRow { Timestamp = time, Bid = 1.1m, BidSize = 5m }, Contract, TimeZones.NewYork)!;
             Assert.AreEqual(1.1m, tick.BidPrice);
-            Assert.AreEqual(1.2m, tick.AskPrice);
+            Assert.AreEqual(0m, tick.AskPrice);
             Assert.AreEqual(time, tick.Time);
         }
 
