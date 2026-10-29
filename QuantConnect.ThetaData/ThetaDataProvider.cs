@@ -345,9 +345,16 @@ namespace QuantConnect.Lean.DataSource.ThetaData
 
         /// <summary>
         /// Validate the user of this project has permission to be using it via our web API.
+        /// The no-auth-needed config key, set by the lean CLI's --no-auth-needed option, skips the check.
         /// </summary>
         private static void ValidateSubscription()
         {
+            if (Config.GetBool("no-auth-needed"))
+            {
+                Log.Trace("ThetaDataProvider.ValidateSubscription(): skipped, no-auth-needed is set.");
+                return;
+            }
+
             try
             {
                 const int productId = 344;

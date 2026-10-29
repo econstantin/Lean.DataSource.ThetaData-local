@@ -41,6 +41,21 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         private static readonly Symbol CanonicalSpy = Symbol.CreateCanonicalOption(Spy);
         private const string FreePlanDenial = "Requesting an option endpoint requiring a value subscription, but you only have a FREE subscription. Please consider upgrading! ( https://www.thetadata.net/subscribe )";
 
+        private bool _noAuthNeeded;
+
+        [OneTimeSetUp]
+        public void OneTimeSetUp()
+        {
+            _noAuthNeeded = Config.GetBool("no-auth-needed");
+            Config.Set("no-auth-needed", "true");
+        }
+
+        [OneTimeTearDown]
+        public void OneTimeTearDown()
+        {
+            Config.Set("no-auth-needed", _noAuthNeeded ? "true" : "false");
+        }
+
         /// <summary>
         /// Answers like a Free plan terminal that has data for 2026-10-19 and 2026-10-20 only.
         /// </summary>

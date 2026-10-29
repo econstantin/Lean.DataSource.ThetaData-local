@@ -6,7 +6,9 @@
 
 This library, built on .NET 10, connects the QuantConnect LEAN engine to ThetaData. It uses the ThetaData REST API v3 through Theta Terminal v3 (default port 25503).
 
+- [LOCAL_LEAN_SETUP.md](LOCAL_LEAN_SETUP.md): build the connector, add it to a local LEAN image, download data, and run research and backtests.
 - [MIGRATION.md](MIGRATION.md): what changed from API v2, the configuration keys, and what each plan allows.
+- [AUDIT.md](AUDIT.md): known defects, fixes, and open risks.
 
 ## Introduction
 ThetaData Library is an open-source project written in C#, designed to simplify the process of accessing real-time and historical financial market data. With support for Options Data across all exchanges and low latency, it offers a comprehensive solution for algorithmic trading.
@@ -38,7 +40,7 @@ Utilize the power of QuantConnect.LEAN CLI to test and optimize your trading alg
 ## Getting Started
 You can use the following command line arguments to launch the [LEAN CLI](https://github.com/quantConnect/Lean-cli) pip project with ThetaData. For more detailed information, refer to the [ThetaData](https://www.quantconnect.com/docs/v2/lean-cli/datasets/theta-data) documentation.
 
-Each command needs `--thetadata-rest-url http://host.docker.internal:25503`: the CLI's built-in default is the retired v2 port 25510.
+Each command needs `--thetadata-rest-url http://host.docker.internal:25503`: the CLI's built-in default is the retired v2 port 25510. For a locally built connector, follow [LOCAL_LEAN_SETUP.md](LOCAL_LEAN_SETUP.md).
 
 ### Downloading Data
 

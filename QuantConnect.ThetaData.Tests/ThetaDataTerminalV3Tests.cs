@@ -19,6 +19,7 @@ using NUnit.Framework;
 using QuantConnect.Data;
 using QuantConnect.Securities;
 using QuantConnect.Data.Market;
+using QuantConnect.Configuration;
 using QuantConnect.Data.UniverseSelection;
 
 namespace QuantConnect.Lean.DataSource.ThetaData.Tests
@@ -26,7 +27,7 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
     /// <summary>
     /// Runs against a real Theta Terminal v3 on any plan, including Free. Set the address in the 'thetadata-rest-url'
     /// config key or the QC_THETADATA_REST_URL environment variable. The default is http://127.0.0.1:25503.
-    /// The terminal holds the ThetaData login. The provider still checks the QuantConnect module license.
+    /// The terminal holds the ThetaData login, so these tests need no credential.
     /// </summary>
     [TestFixture]
     [Explicit("Needs Theta Terminal v3 running. Uses only end-of-day data, which the Free plan allows.")]
@@ -35,10 +36,13 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         private static readonly Symbol Spy = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
         private static readonly DateTime TradingDay = new(2026, 10, 20);
         private ThetaDataProvider _provider = null!;
+        private bool _noAuthNeeded;
 
         [OneTimeSetUp]
         public void OneTimeSetUp()
         {
+            _noAuthNeeded = Config.GetBool("no-auth-needed");
+            Config.Set("no-auth-needed", "true");
             _provider = new ThetaDataProvider("Free");
         }
 
@@ -46,6 +50,7 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
         public void OneTimeTearDown()
         {
             _provider.Dispose();
+            Config.Set("no-auth-needed", _noAuthNeeded ? "true" : "false");
         }
 
         private static HistoryRequest Request(Symbol symbol, Type dataType, TickType tickType, DateTime startLocal, DateTime endLocal)
