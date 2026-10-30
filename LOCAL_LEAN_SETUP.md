@@ -123,10 +123,11 @@ A daily option backtest reads 2 kinds of files:
   bars of every contract.
 
 LEAN downloads a missing file by itself, but for the yearly zip that does not
-work in practice. LEAN asks for the whole chain from January 1 to yesterday,
-then rewrites the zip once per contract: about 30,000 SPY contracts a year.
-LEAN also downloads the zip again when it is older than 7 days
-(`downloader-data-update-period`).
+work in practice. LEAN asks for the whole chain of the file's year, up to
+yesterday, then rewrites the zip once per contract: about 30,000 SPY contracts
+a year. LEAN also downloads the zip again when it is older than 7 days
+(`downloader-data-update-period`). LEAN commit `27f89cb4d` does not change this
+automatic download.
 
 So write the files ahead with `lean data download`. The image must hold LEAN
 commit `27f89cb4d` or later, which writes each option zip once:
