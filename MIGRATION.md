@@ -64,7 +64,7 @@ The streaming API did not change. The v3 docs still name
 | `thetadata-ws-url` | `ws://127.0.0.1:25520/v1/events` | unchanged |
 | `thetadata-max-concurrent-requests` | none | new. Default by plan: Free 1, Value 2, Standard 4, Pro 8 (v3 docs, "Concurrent Requests"). |
 | `thetadata-request-timeout-seconds` | none, 5 minutes | new, default 300 |
-| `no-auth-needed` | none | new. When `true`, the connector skips the QuantConnect module license check. The `local` branch of the lean-cli fork sets it for `--no-auth-needed`. Keep it out of an upstream pull request. |
+| `no-auth-needed` | none | new. When `true`, the connector skips the QuantConnect module license check. The `patched` branch of the lean-cli fork sets it for `--no-auth-needed`. Keep it out of an upstream pull request. |
 
 **Caution:** the lean CLI's module list gives `thetadata-rest-url` the default
 `http://host.docker.internal:25510`. That is the v2 port. Pass

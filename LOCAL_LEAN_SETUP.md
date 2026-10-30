@@ -16,7 +16,7 @@ in PowerShell 7, on the Free plan.
   The answer holds 1 row with `open`, `high`, `low`, and `close`.
 - Docker Desktop running.
 - The .NET 10 SDK.
-- The `lean` CLI installed from the `local` branch of the `lean-cli` fork. That
+- The `lean` CLI installed from the `patched` branch of the `lean-cli` fork. That
   branch has the `--no-auth-needed` option. Without it, the CLI installs
   QuantConnect's own ThetaData package, which needs a QuantConnect module
   license and still uses API v2.
