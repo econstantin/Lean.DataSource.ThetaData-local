@@ -128,8 +128,27 @@ then rewrites the zip once per contract: about 30,000 SPY contracts a year.
 LEAN also downloads the zip again when it is older than 7 days
 (`downloader-data-update-period`).
 
-So write both kinds of files ahead with the writer in this repository. It sends
-1 request per trading day and writes each zip once:
+So write the files ahead with `lean data download`. The image must hold LEAN
+commit `27f89cb4d` or later, which writes each option zip once:
+
+```powershell
+$spy = @(
+    '--data-provider-historical', 'ThetaData',
+    '--image', 'lean-cli/engine:thetadata',
+    '--security-type', 'Option', '--market', 'usa',
+    '--resolution', 'Daily', '--ticker', 'SPY'
+) + $theta
+foreach ($type in 'Universe', 'Trade', 'Quote') {
+    lean data download @spy --data-type $type --start 20261022 --end 20261024
+}
+```
+
+- `--end` is the day after the last trading day.
+- The run above took 37 s for `Universe`, 71 s for `Trade`, and 95 s for `Quote`
+  (2026-10-30).
+
+The writer in this repository also writes both kinds of files. It needs no such
+image. It sends 1 request per trading day:
 
 ```powershell
 dotnet build -c Release "$connector\QuantConnect.ThetaData.DataWriter\QuantConnect.DataSource.ThetaData.DataWriter.csproj"
@@ -163,10 +182,11 @@ data. The rows have open interest only when the plan includes it, so on the
 Free plan an open interest filter also selects nothing. Filter by strike and
 expiration.
 
-Avoid `--data-type Trade` or `Quote` with `--security-type Option` for a whole
-chain. The connector returns the 5,000 or more contracts of a day in about 20
-seconds, but LEAN's file writer then rewrites the yearly zip file once per
-contract. On 2026-10-28 it wrote 1,710 of 5,163 contracts in 11 minutes.
+**Caution:** with an image that lacks LEAN commit `27f89cb4d`, do not use
+`--data-type Trade` or `Quote` with `--security-type Option` for a whole chain.
+LEAN's file writer then rewrites the yearly zip file once per contract. On
+2026-10-28 it wrote 1,710 of 5,163 contracts in 11 minutes. Use the writer with
+such an image.
 
 ## 5. Run a backtest
 
