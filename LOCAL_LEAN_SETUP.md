@@ -78,22 +78,36 @@ docker run --rm --entrypoint sha256sum lean-cli/engine:thetadata /Lean/Launcher/
 
 Build the 2 images again after each change to the connector.
 
-## 3. Use a separate LEAN workspace
+## 3. Choose a LEAN workspace
 
-**Warning:** a ThetaData run downloads into the workspace's data folder and
-replaces files there. For example, it writes `equity/usa/daily/spy.zip` with
-data from 2023-06-01 only, the first date of the Free plan. Use a workspace
-whose data folder holds no data you need.
+Use `C:\LeanWork` for option data you keep. Set `$workspace = 'C:\LeanWork'`,
+and run the commands of section 4. The option commands there write only option
+files. Then run backtests from local files, as
+`docs/operations/thetadata-options.md` in that repo says.
+
+Use a throwaway workspace for sections 5 to 7, and for any test of a connector
+change that can write bad data.
+
+**Warning:** a run with `--data-provider-historical ThetaData` downloads into
+the workspace's data folder and replaces files there. For example, it writes
+`equity/usa/daily/spy.zip` with data from 2023-06-01 only, the first date of the
+Free plan. Never run it in `C:\LeanWork`.
 
 ```powershell
-$workspace = "$root\thetadata-smoke"
+$workspace = "$root\thetadata-tmp"
 New-Item -ItemType Directory $workspace | Out-Null
 Copy-Item "$root\Lean\Data" "$workspace\data" -Recurse
 Copy-Item 'C:\LeanWork\lean.json.example' "$workspace\lean.json"
 ```
 
 `lean.json.example` is a `lean.json` with every secret empty and
-`"data-folder": "data"`. Any such file works.
+`"data-folder": "data"`. Any such file works. When the test ends, remove the
+throwaway workspace:
+
+```powershell
+Set-Location $root
+Remove-Item $workspace -Recurse -Force
+```
 
 Every `lean` command below runs in the workspace and takes these options.
 `host.docker.internal` is the address of the Windows host inside a container.
@@ -190,6 +204,8 @@ LEAN's file writer then rewrites the yearly zip file once per contract. On
 such an image.
 
 ## 5. Run a backtest
+
+Run this section and sections 6 and 7 in the throwaway workspace of section 3.
 
 `examples/ThetaDataOptionSmoke/main.py` adds SPY and its options, selects 1
 call, and logs the chain size and the call's prices each day. It places no
