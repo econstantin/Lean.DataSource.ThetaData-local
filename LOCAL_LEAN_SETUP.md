@@ -1,9 +1,10 @@
 # Use the ThetaData connector with a local LEAN CLI
 
-This guide builds the connector from this checkout, adds it to a local LEAN
-engine image, and runs a download, a research notebook, and a backtest on
-ThetaData end-of-day data. Every command here ran on 2026-10-28 on Windows 11,
-in PowerShell 7, on the Free plan.
+This guide builds the connector from this checkout, builds the local LEAN
+images that hold it, and runs a download, a research notebook, and a backtest
+on ThetaData end-of-day data. The commands ran on 2026-10-28 on Windows 11, in
+PowerShell 7, on the Free plan. That run used a separate image with this
+connector added.
 
 ## What you need
 
@@ -20,9 +21,8 @@ in PowerShell 7, on the Free plan.
   branch has the `--no-auth-needed` option. Without it, the CLI installs
   QuantConnect's own ThetaData package, which needs a QuantConnect module
   license and still uses API v2.
-- A LEAN engine image and research image. This guide extends
-  `lean-cli/engine:local` and `lean-cli/research:local`. The official
-  `quantconnect/lean:latest` and `quantconnect/research:latest` work the same way.
+- The images `lean-cli/engine:local` and `lean-cli/research:local`, built as
+  section 2 says. The official images do not hold this connector.
 - `Lean`, the LEAN source checkout, next to this checkout. The project file
   links `..\..\Lean\Common\Properties\SharedAssemblyInfo.cs`.
 
@@ -57,23 +57,19 @@ dotnet test "$connector\QuantConnect.ThetaData.Tests\bin\Release\QuantConnect.Le
 
 To test against a terminal on another address, set `QC_THETADATA_REST_URL`.
 
-## 2. Add the connector to the images
+## 2. Build the images
 
-The Dockerfile copies the connector DLL into `/Lean/Launcher/bin/Debug`, the
-folder from which the engine loads plugins. It changes no other file of the
-base image.
-
-```powershell
-$output = "$connector\QuantConnect.ThetaData\bin\Release"
-docker build -f "$connector\local-lean\Dockerfile" --build-arg BASE_IMAGE=lean-cli/engine:local -t lean-cli/engine:thetadata $output
-docker build -f "$connector\local-lean\Dockerfile" --build-arg BASE_IMAGE=lean-cli/research:local -t lean-cli/research:thetadata $output
-```
+`lean-cli/engine:local` and `lean-cli/research:local` hold the connector. The
+build copies it into `/Lean/Launcher/bin/Debug`, the folder from which the
+engine loads plugins. To build the images, follow "Build a local engine image
+with the IB, DataBento, and ThetaData modules" in
+`docs/operations/lean-local-workflow.md` of `C:\LeanWork`.
 
 Check that the engine image holds the new build. The 2 hashes must be equal:
 
 ```powershell
-docker run --rm --entrypoint sha256sum lean-cli/engine:thetadata /Lean/Launcher/bin/Debug/QuantConnect.Lean.DataSource.ThetaData.dll
-(Get-FileHash "$output\QuantConnect.Lean.DataSource.ThetaData.dll" -Algorithm SHA256).Hash.ToLower()
+docker run --rm --entrypoint sha256sum lean-cli/engine:local /Lean/Launcher/bin/Debug/QuantConnect.Lean.DataSource.ThetaData.dll
+(Get-FileHash "$root\DataLibraries\QuantConnect.Lean.DataSource.ThetaData.dll" -Algorithm SHA256).Hash.ToLower()
 ```
 
 Build the 2 images again after each change to the connector.
@@ -149,7 +145,7 @@ commit `27f89cb4d` or later, which writes each option zip once:
 ```powershell
 $spy = @(
     '--data-provider-historical', 'ThetaData',
-    '--image', 'lean-cli/engine:thetadata',
+    '--image', 'lean-cli/engine:local',
     '--security-type', 'Option', '--market', 'usa',
     '--resolution', 'Daily', '--ticker', 'SPY'
 ) + $theta
@@ -180,7 +176,7 @@ dotnet build -c Release "$connector\QuantConnect.ThetaData.DataWriter\QuantConne
 To write only the universe files, the CLI also works:
 
 ```powershell
-lean data download --data-provider-historical ThetaData --data-type Universe --resolution Daily --security-type Option --market usa --ticker SPY --start 20261019 --end 20261024 --image lean-cli/engine:thetadata @theta
+lean data download --data-provider-historical ThetaData --data-type Universe --resolution Daily --security-type Option --market usa --ticker SPY --start 20261019 --end 20261024 --image lean-cli/engine:local @theta
 ```
 
 - For `Universe`, LEAN writes a file for each trading day from `--start` to `--end`, both included. The command above writes 2026-10-19 to 2026-10-23 (2026-10-24 is a Saturday). A run with `--start 20261022 --end 20261023` wrote 2 files. The CLI rejects an `--end` that is not after `--start`.
@@ -214,7 +210,7 @@ order.
 ```powershell
 New-Item -ItemType Directory "$workspace\ThetaDataOptionSmoke" -Force | Out-Null
 Copy-Item "$connector\examples\ThetaDataOptionSmoke\main.py" "$workspace\ThetaDataOptionSmoke\"
-lean backtest ThetaDataOptionSmoke --data-provider-historical ThetaData --image lean-cli/engine:thetadata @theta
+lean backtest ThetaDataOptionSmoke --data-provider-historical ThetaData --image lean-cli/engine:local @theta
 ```
 
 The run took about 10 s. The log of the run,
@@ -248,7 +244,7 @@ The run took about 10 s. The log of the run,
 
 ```powershell
 Copy-Item "$connector\examples\ThetaDataOptionSmoke\research.ipynb" "$workspace\ThetaDataOptionSmoke\"
-lean research ThetaDataOptionSmoke --data-provider-historical ThetaData --image lean-cli/research:thetadata @theta
+lean research ThetaDataOptionSmoke --data-provider-historical ThetaData --image lean-cli/research:local @theta
 ```
 
 The command opens Jupyter Lab. Open `research.ipynb` and run all cells. On
@@ -264,8 +260,8 @@ To run the notebook without a browser, start Jupyter detached and run the
 notebook in the container:
 
 ```powershell
-lean research ThetaDataOptionSmoke --data-provider-historical ThetaData --image lean-cli/research:thetadata @theta --detach --no-open --port 8899
-$container = docker ps --filter ancestor=lean-cli/research:thetadata --format '{{.Names}}'
+lean research ThetaDataOptionSmoke --data-provider-historical ThetaData --image lean-cli/research:local @theta --detach --no-open --port 8899
+$container = docker ps --filter ancestor=lean-cli/research:local --format '{{.Names}}'
 docker exec -w /Lean/Launcher/bin/Debug/Notebooks $container jupyter nbconvert --to notebook --execute research.ipynb --output /tmp/research-out.ipynb
 docker stop $container
 ```
@@ -279,7 +275,7 @@ file has a date in its name and is never downloaded again. To run only from
 local files, use the `Local` data provider:
 
 ```powershell
-lean backtest ThetaDataOptionSmoke --data-provider-historical Local --image lean-cli/engine:thetadata --no-update --no-auth-needed
+lean backtest ThetaDataOptionSmoke --data-provider-historical Local --image lean-cli/engine:local --no-update --no-auth-needed
 ```
 
 The engine log names `DefaultDataProvider`. On 2026-10-28 this run printed the

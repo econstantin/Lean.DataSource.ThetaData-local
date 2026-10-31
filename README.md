@@ -6,7 +6,7 @@
 
 This library, built on .NET 10, connects the QuantConnect LEAN engine to ThetaData. It uses the ThetaData REST API v3 through Theta Terminal v3 (default port 25503).
 
-- [LOCAL_LEAN_SETUP.md](LOCAL_LEAN_SETUP.md): build the connector, add it to a local LEAN image, download data, and run research and backtests.
+- [LOCAL_LEAN_SETUP.md](LOCAL_LEAN_SETUP.md): build the connector and the local LEAN images, download data, and run research and backtests.
 - [MIGRATION.md](MIGRATION.md): what changed from API v2, the configuration keys, and what each plan allows.
 - [AUDIT.md](AUDIT.md): known defects, fixes, and open risks.
 
